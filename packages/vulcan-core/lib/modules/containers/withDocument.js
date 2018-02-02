@@ -2,14 +2,16 @@ import React, { Component } from 'react';
 import PropTypes from 'prop-types';
 import { graphql } from 'react-apollo';
 import gql from 'graphql-tag';
-import { getSetting, getFragment, getFragmentName } from 'meteor/vulcan:core';
+import { getSetting, getFragment, getFragmentName, getCollection } from 'meteor/vulcan:core';
 
 export default function withDocument (options) {
     
-  const { collection, pollInterval = getSetting('pollInterval', 20000), enableCache = false, extraQueries } = options,
-        queryName = options.queryName || `${collection.options.collectionName}SingleQuery`,
-        singleResolverName = collection.options.resolvers.single && collection.options.resolvers.single.name;
+  const { collectionName, pollInterval = getSetting('pollInterval', 20000), enableCache = false, extraQueries } = options;
 
+  const collection = options.collection || getCollection(collectionName);
+  const queryName = options.queryName || `${collection.options.collectionName}SingleQuery`;
+  const singleResolverName = collection.options.resolvers.single && collection.options.resolvers.single.name;
+ 
   let fragment;
 
   if (options.fragment) {
@@ -47,7 +49,7 @@ export default function withDocument (options) {
       return graphQLOptions;
     },
     props: returnedProps => {
-      const { ownProps, data } = returnedProps;
+      const { /* ownProps, */ data } = returnedProps;
       
       const propertyName = options.propertyName || 'document';
       const props = {
