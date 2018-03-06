@@ -12,26 +12,42 @@ const schema = {
   createdAt: {
     type: Date,
     optional: true,
-    viewableBy: ['guests'],
+    viewableBy: ['admins'],
     onInsert: (document, currentUser) => {
       return new Date();
-    }
+    },
   },
   userId: {
     type: String,
     optional: true,
-    viewableBy: ['guests'],
+    viewableBy: ['admins'],
+    resolveAs: {
+      fieldName: 'user',
+      type: 'User',
+      resolver: async (post, args, { currentUser, Users }) => {
+        const user = await Users.loader.load(post.userId);
+        return Users.restrictViewableFields(currentUser, Users, user);
+      },
+      addOriginalField: true
+    },
+  },
+  type: {
+    type: String,
+    optional: true,
+    viewableBy: ['admins'],
   },
   
   // custom properties
 
   associatedCollection: {
     type: String,
+    viewableBy: ['admins'],
     optional: true,
   },
 
   associatedId: {
     type: String,
+    viewableBy: ['admins'],
     optional: true,
   },
 
@@ -42,32 +58,37 @@ const schema = {
 
   productKey: {
     type: String,
+    viewableBy: ['admins'],
     optional: true,
   },
 
-  type: {
+  source: {
     type: String,
+    viewableBy: ['admins'],
     optional: false,
   },
 
   test: {
     type: Boolean,
+    viewableBy: ['admins'],
     optional: true,
   },
 
   data: {
     type: Object,
-    viewableBy: ['guests'],
+    viewableBy: ['admins'],
     blackbox: true,
   },
 
   properties: {
     type: Object,
+    viewableBy: ['admins'],
     blackbox: true,
   },
 
   ip: {
     type: String,
+    viewableBy: ['admins'],
     optional: true,
   },
 
@@ -76,7 +97,7 @@ const schema = {
   createdAtFormatted: {
     type: String,
     optional: true,
-    viewableBy: ['guests'],
+    viewableBy: ['admins'],
     resolveAs: {
       type: 'String',
       resolver: (charge, args, context) => {
@@ -85,10 +106,34 @@ const schema = {
     }  
   },
 
+  createdAtFormattedShort: {
+    type: String,
+    optional: true,
+    viewableBy: ['admins'],
+    resolveAs: {
+      type: 'String',
+      resolver: (charge, args, context) => {
+        return moment(charge.createdAt).format('YYYY/MM/DD, hh:mm');
+      }
+    }  
+  },
+
+  stripeId: {
+    type: String,
+    optional: true,
+    viewableBy: ['admins'],
+    resolveAs: {
+      type: 'String',
+      resolver: (charge, args, context) => {
+        return charge.data && charge.data.id;
+      }
+    } 
+  },
+
   stripeChargeUrl: {
     type: String,
     optional: true,
-    viewableBy: ['guests'],
+    viewableBy: ['admins'],
     resolveAs: {
       type: 'String',
       resolver: (charge, args, context) => {
@@ -96,6 +141,21 @@ const schema = {
       }
     } 
   },
+
+  // doesn't work yet
+
+  // associatedDocument: {
+  //   type: Object,
+  //   viewableBy: ['admins'],
+  //   optional: true,
+  //   resolveAs: {
+  //     type: 'Chargeable',
+  //     resolver: (charge, args, context) => {
+  //       const collection = getCollection(charge.associatedCollection);
+  //       return collection.loader.load(charge.associatedId);
+  //     }
+  //   } 
+  // },
 
 };
 

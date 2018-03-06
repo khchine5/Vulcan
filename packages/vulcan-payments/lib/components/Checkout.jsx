@@ -1,4 +1,5 @@
-import React from 'react'
+import React from 'react';
+import PropTypes from 'prop-types';
 import StripeCheckout from 'react-stripe-checkout';
 import { Components, registerComponent, getSetting, withCurrentUser, withMessages } from 'meteor/vulcan:core';
 import Users from 'meteor/vulcan:users';
@@ -59,7 +60,7 @@ class Checkout extends React.Component {
 
   render() {
 
-    const {productKey, currentUser, button, coupon} = this.props;
+    const { productKey, currentUser, button, coupon, associatedDocument, customAmount } = this.props;
   
     const sampleProduct = {
       amount: 10000,
@@ -71,24 +72,24 @@ class Checkout extends React.Component {
     // get the product from Products (either object or function applied to doc)
     // or default to sample product
     const definedProduct = Products[productKey];
-    const product = typeof definedProduct === 'function' ? definedProduct(this.props.associatedDocument) : definedProduct || sampleProduct;
+    const product = typeof definedProduct === 'function' ? definedProduct(associatedDocument) : definedProduct || sampleProduct;
 
-    // if product has initial amount, add it to amount (for subscription products)
-    let amount = product.initialAmount ? product.initialAmount + product.amount : product.amount;
+    // if product has initial amount, use it  (for subscription products)
+    let checkoutAmount = customAmount || ( product.initialAmount ? product.initialAmount + product.amount : product.amount );
 
     if (coupon && product.coupons && product.coupons[coupon]) {
-      amount -= product.coupons[coupon];
+      checkoutAmount -= product.coupons[coupon];
     }
 
     return (
       <div className={classNames('stripe-checkout', {'checkout-loading': this.state.loading})}>
         <StripeCheckout
           token={this.onToken}
-          stripeKey={Meteor.isDevelopment ? stripeSettings.publishableKeyTest : stripeSettings.publishableKey}
+          stripeKey={Meteor.isDevelopment || stripeSettings.alwaysUseTest ? stripeSettings.publishableKeyTest : stripeSettings.publishableKey}
           ComponentClass="div"
           name={product.name}
           description={product.description}
-          amount={amount}
+          amount={checkoutAmount}
           currency={product.currency}
           email={Users.getEmail(currentUser)}
           allowRememberMe
@@ -107,6 +108,15 @@ class Checkout extends React.Component {
 
 Checkout.contextTypes = {
   intl: intlShape
+};
+
+Checkout.propTypes = {
+  productKey: PropTypes.string,
+  currentUser: PropTypes.object, 
+  button: PropTypes.func, 
+  coupon: PropTypes.string,
+  associatedDocument: PropTypes.object,
+  customAmount: PropTypes.number,
 };
 
 const WrappedCheckout = (props) => {

@@ -1,5 +1,5 @@
 import Users from 'meteor/vulcan:users';
-import { Utils, addGraphQLMutation, addGraphQLResolvers } from 'meteor/vulcan:core';
+import { Utils, addGraphQLMutation, addGraphQLResolvers, Connectors } from 'meteor/vulcan:core';
 
 /**
  * @summary Verify that the un/subscription can be performed
@@ -90,7 +90,7 @@ const performSubscriptionAction = (action, collection, itemId, user) => {
   const { collectionName, fields, item, findOperator, updateOperator, updateCount } = subscription;
 
   // Perform the action, eg. operate on the item's collection
-  const result = collection.update({
+  const result = Connectors.update(collection, {
     _id: itemId,
     // if it's a subscription, find  where there are not the user (ie. findOperator = $ne), else it will be $in
     [fields.subscribers]: { [findOperator]: user._id }

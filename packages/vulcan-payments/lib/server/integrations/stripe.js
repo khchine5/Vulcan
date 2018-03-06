@@ -1,25 +1,31 @@
-import { getSetting, registerSetting, newMutation, editMutation, Collections, registerCallback, runCallbacks, runCallbacksAsync } from 'meteor/vulcan:core';
+import { webAppConnectHandlersUse, debug, debugGroup, debugGroupEnd, getSetting, registerSetting, newMutation, editMutation, Collections, registerCallback, runCallbacks, runCallbacksAsync, Connectors } from 'meteor/vulcan:core';
 import express from 'express';
 import Stripe from 'stripe';
 import Charges from '../../modules/charges/collection.js';
 import Users from 'meteor/vulcan:users';
 import { Products } from '../../modules/products.js';
-import { webAppConnectHandlersUse } from 'meteor/vulcan:core';
+import { Promise } from 'meteor/promise';
 
 registerSetting('stripe', null, 'Stripe settings');
+registerSetting('stripe.publishableKey', null, 'Publishable key', true);
+registerSetting('stripe.publishableKeyTest', null, 'Publishable key (test)', true);
+registerSetting('stripe.secretKey', null, 'Secret key');
+registerSetting('stripe.secretKeyTest', null, 'Secret key (test)');
+registerSetting('stripe.endpointSecret', null, 'Endpoint secret for webhook');
+registerSetting('stripe.alwaysUseTest', false, 'Always use test keys in all environments', true);
 
 const stripeSettings = getSetting('stripe');
 
 // initialize Stripe
-const keySecret = Meteor.isDevelopment ? stripeSettings.secretKeyTest : stripeSettings.secretKey;
-const stripe = new Stripe(keySecret);
+const keySecret = Meteor.isDevelopment || stripeSettings.alwaysUseTest ? stripeSettings.secretKeyTest : stripeSettings.secretKey;
+export const stripe = new Stripe(keySecret);
 
 const sampleProduct = {
   amount: 10000,
   name: 'My Cool Product',
   description: 'This product is awesome.',
   currency: 'USD',
-}
+};
 
 /*
 
@@ -31,7 +37,7 @@ export const performAction = async (args) => {
   
   let collection, document, returnDocument = {};
 
-  const {token, userId, productKey, associatedCollection, associatedId, properties } = args;
+  const { userId, productKey, associatedCollection, associatedId, properties } = args;
 
   if (!stripeSettings) {
     throw new Error('Please fill in your Stripe settings');
@@ -41,7 +47,7 @@ export const performAction = async (args) => {
   // get the associated collection and document
   if (associatedCollection && associatedId) {
     collection = _.findWhere(Collections, {_name: associatedCollection});
-    document = collection.findOne(associatedId);
+    document = await Connectors.get(collection, associatedId);
   }
 
   // get the product from Products (either object or function applied to doc)
@@ -50,12 +56,10 @@ export const performAction = async (args) => {
   const product = typeof definedProduct === 'function' ? definedProduct(document) : definedProduct || sampleProduct;
 
   // get the user performing the transaction
-  const user = Users.findOne(userId);
-
-  const customer = await getCustomer(user, token.id);
+  const user = await Connectors.get(Users, userId);
 
   // create metadata object
-  const metadata = {
+  let metadata = {
     userId: userId,
     userName: Users.getDisplayName(user),
     userProfile: Users.getProfileUrl(user, true),
@@ -68,12 +72,14 @@ export const performAction = async (args) => {
     metadata.associatedId = associatedId;
   }
 
+  metadata = await runCallbacks('stripe.charge.sync', metadata, user, product, collection, document, args);
+
   if (product.plan) {
     // if product has a plan, subscribe user to it
-    returnDocument = await subscribeUser({user, customer, product, collection, document, metadata, args});
+    returnDocument = await createSubscription({ user, product, collection, document, metadata, args });
   } else {
     // else, perform charge
-    returnDocument = await createCharge({user, customer, product, collection, document, metadata, args});
+    returnDocument = await createCharge({ user, product, collection, document, metadata, args });
   }
 
   return returnDocument;
@@ -119,9 +125,11 @@ export const getCustomer = async (user, id) => {
 Create one-time charge. 
 
 */
-export const createCharge = async ({user, customer, product, collection, document, metadata, args}) => {
+export const createCharge = async ({user, product, collection, document, metadata, args}) => {
 
-  const { /* token, userId, productKey, associatedId, properties, */ coupon } = args;
+  const { token, /* userId, productKey, associatedId, properties, */ coupon } = args;
+
+  const customer = await getCustomer(user, token);
 
   let amount = product.amount;
 
@@ -139,23 +147,162 @@ export const createCharge = async ({user, customer, product, collection, documen
     currency: product.currency,
     customer: customer.id,
     metadata
-  }
+  };
 
   // create Stripe charge
   const charge = await stripe.charges.create(chargeData);
 
-  return processCharge({collection, document, charge, args, user})
+  charge.objectType = 'charge';
 
-}
+  runCallbacksAsync('stripe.charge.async', charge, collection, document, args, user);
+
+  return processEvent({collection, document, stripeObject: charge, args, user})
+
+};
 
 /*
 
-Process charge on Vulcan's side
+Subscribe a user to a Stripe plan
 
 */
-export const processCharge = async ({collection, document, charge, args, user}) => {
+export const createSubscription = async ({user, product, collection, document, metadata, args }) => {
+
+  let returnDocument = document;
+
+  try {
+    const customer = await getCustomer(user, args.token.id);
+    // if product has an initial cost, 
+    // create an invoice item and attach it to the customer first
+    // see https://stripe.com/docs/subscriptions/invoices#adding-invoice-items
+    if (product.initialAmount) {
+      // eslint-disable-next-line no-unused-vars
+      const initialInvoiceItem = await stripe.invoiceItems.create({
+        customer: customer.id,
+        amount: product.initialAmount,
+        currency: product.currency,
+        description: product.initialAmountDescription,
+      });
+    }
+
+    // eslint-disable-next-line no-unused-vars
+    const subscription = await stripe.subscriptions.create({
+      customer: customer.id,
+      items: [
+        { plan: product.plan },
+      ],
+      metadata,
+      ...product.subscriptionProperties,
+    });
+
+    subscription.objectType = 'subscription';
+
+    // if an associated collection and id have been provided, 
+    // update the associated document
+    if (collection && document) {
+
+      let modifier = {
+        $set: {},
+        $unset: {}
+      }
+
+      // run collection.subscribe.sync callbacks
+      modifier = runCallbacks(`${collection._name}.subscribe.sync`, modifier, document, subscription, user);
+
+      returnDocument = await editMutation({
+        collection,
+        documentId: document._id,
+        set: modifier.$set,
+        unset: modifier.$unset,
+        validate: false
+      });
+
+      returnDocument.__typename = collection.typeName;
+
+    }
+
+    runCallbacksAsync('stripe.subscribe.async', subscription, collection, returnDocument, args, user);
+    
+    await processEvent({collection, document, stripeObject: subscription, args, user})
+
+    return returnDocument;
+
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.log('// Stripe createSubscription error');
+    // eslint-disable-next-line no-console
+    console.log(error);
+  }
+};
+
+// create a stripe plan
+// plan is used as the unique ID and is not needed for creating a plan
+const createPlan = async ({
+  // Extract all the known properties for the stripe api
+  // Evertying else goes in the metadata field
+  plan: id,
+  currency,
+  interval,
+  name,
+  amount,
+  interval_count,
+  statement_descriptor,
+  ...metadata
+}) => stripe.plans.create({
+  id,
+  currency,
+  interval,
+  name,
+  amount,
+  interval_count,
+  statement_descriptor,
+  ...metadata
+});
+export const createSubscriptionPlan = async (maybePlanObject) => typeof maybePlanObject === 'object' && createPlan(maybePlanObject);
+const retrievePlan = async (planObject) => stripe.plans.retrieve(planObject.plan);
+export const retrieveSubscriptionPlan = async (maybePlanObject) => typeof maybePlanObject === 'object' && retrievePlan(maybePlanObject);
+const createOrRetrievePlan = async (planObject) => {
+  return retrievePlan(planObject)
+    .catch(error => {
+      // Plan does not exist, create it
+      if (error.statusCode === 404) {
+        // eslint-disable-next-line no-console
+        console.log(`Creating subscription plan ${planObject.plan} for ${(planObject.amount && (planObject.amount / 100).toLocaleString('en-US', { style: 'currency', currency: planObject.currency })) || 'free'}`);
+        return createPlan(planObject);
+      }
+      // Something else went wrong
+      // eslint-disable-next-line no-console
+      console.error(error);
+      throw error;
+    });
+};
+export const createOrRetrieveSubscriptionPlan = async (maybePlanObject) => typeof maybePlanObject === 'object' && createOrRetrievePlan(maybePlanObject);
+
+
+/*
+
+Process charges, subscriptions, etc. on Vulcan's side
+
+*/
+export const processEvent = async ({collection, document, stripeObject, args, user}) => {
  
+  debug('');
+  debugGroup(`--------------- start\x1b[35m processEvent \x1b[0m ---------------`);
+  debug(`Collection: ${collection.options.collectionName}`);
+  debug(`documentId: ${document._id}`);
+  debug(`Charge: ${stripeObject}`);
+  
   let returnDocument = {};
+
+  // make sure charge hasn't already been processed
+  // (could happen with multiple endpoints listening)
+
+  const existingCharge = await Connectors.get(Charges, { 'data.id': stripeObject.id });
+
+  if (existingCharge) {
+    // eslint-disable-next-line no-console
+    console.log(`// Charge with Stripe id ${stripeObject.id} already exists in db; aborting processEvent`);
+    return collection && document ? document : {};
+  }
 
   const {token, userId, productKey, associatedCollection, associatedId, properties, livemode } = args;
 
@@ -163,14 +310,15 @@ export const processCharge = async ({collection, document, charge, args, user}) 
   const chargeDoc = {
     createdAt: new Date(),
     userId,
-    type: 'stripe',
+    type: stripeObject.objectType,
+    source: 'stripe',
     test: !livemode,
-    data: charge,
+    data: stripeObject,
     associatedCollection,
     associatedId,
     properties,
     productKey,
-  }
+  };
 
   if (token) {
     chargeDoc.tokenId = token.id;
@@ -178,7 +326,7 @@ export const processCharge = async ({collection, document, charge, args, user}) 
     chargeDoc.ip = token.client_ip;
   }
   // insert
-  const chargeSaved = newMutation({
+  const chargeSaved = await newMutation({
     collection: Charges,
     document: chargeDoc, 
     validate: false,
@@ -213,46 +361,12 @@ export const processCharge = async ({collection, document, charge, args, user}) 
 
   runCallbacksAsync(`${collection._name}.charge.async`, returnDocument, chargeDoc, user);
 
+  debugGroupEnd();
+  debug(`--------------- end\x1b[35m processEvent \x1b[0m ---------------`);
+  debug('');
+
   return returnDocument;
 }
-
-/*
-
-Subscribe a user to a Stripe plan
-
-*/
-export const subscribeUser = async ({user, customer, product, collection, document, metadata, args }) => {
-  try {
-    // if product has an initial cost, 
-    // create an invoice item and attach it to the customer first
-    // see https://stripe.com/docs/subscriptions/invoices#adding-invoice-items
-    if (product.initialAmount) {
-      // eslint-disable-next-line no-unused-vars
-      const initialInvoiceItem = await stripe.invoiceItems.create({
-        customer: customer.id,
-        amount: product.initialAmount,
-        currency: product.currency,
-        description: product.initialAmountDescription,
-      });
-    }
-
-    // eslint-disable-next-line no-unused-vars
-    const subscription = await stripe.subscriptions.create({
-      customer: customer.id,
-      items: [
-        { plan: product.plan },
-      ],
-      metadata,
-    });
-
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.log('// Stripe subscribeUser error');
-    // eslint-disable-next-line no-console
-    console.log(error);
-  }
-}
-
 
 /*
 
@@ -262,7 +376,7 @@ Webhooks with Express
 
 // see https://github.com/stripe/stripe-node/blob/master/examples/webhook-signing/express.js
 
-const app = express()
+const app = express();
 
 // Add the raw text body of the request to the `request` object
 function addRawBody(req, res, next) {
@@ -308,6 +422,8 @@ app.post('/stripe', async function(req, res) {
 
         const charge = event.data.object;
 
+        charge.objectType = 'charge';
+        
         // eslint-disable-next-line no-console
         console.log(charge);
 
@@ -331,7 +447,12 @@ app.post('/stripe', async function(req, res) {
 
           if (associatedCollection && associatedId) {
             const collection = _.findWhere(Collections, {_name: associatedCollection});
-            const document = collection.findOne(associatedId);
+            const document = await Connectors.get(collection, associatedId);
+
+            // make sure document actually exists
+            if (!document) {
+              throw new Error(`Could not find ${associatedCollection} document with id ${associatedId} associated with subscription id ${subscription.id}; Not processing charge.`)
+            }
 
             const args = {
               userId, 
@@ -341,7 +462,7 @@ app.post('/stripe', async function(req, res) {
               livemode: subscription.livemode,
             }
 
-            processCharge({ collection, document, charge, args});
+            processEvent({ collection, document, stripeObject: charge, args});
 
           }      
         } catch (error) {
@@ -430,7 +551,7 @@ webAppConnectHandlersUse(Meteor.bindEnvironment(app), {name: 'stripe_endpoint', 
 //             livemode: subscription.livemode,
 //           }
 
-//           processCharge({ collection, document, charge, args});
+//           processEvent({ collection, document, charge, args});
 
 //         }      
 //       } catch (error) {
@@ -460,11 +581,53 @@ Meteor.startup(() => {
     });
 
     registerCallback({
-      name: `${collectionName}.charge.sync`, 
+      name: `${collectionName}.charge.async`,
       description: `Perform operations after the charge has succeeded.`,      
       arguments: [{document: 'The associated document'}, {charge: 'The charge'}, {currentUser: 'The current user'}], 
       runs: 'async', 
     });
-    
-  })
-})
+
+    registerCallback({
+      name: `${collectionName}.subscribe.sync`, 
+      description: `Modify the modifier used to modify the subscription's associated document.`,      
+      arguments: [{modifier: 'The modifier'}, {document: 'The associated document'}, {subscription: 'The subscription'}, {currentUser: 'The current user'}], 
+      runs: 'sync', 
+      returns: 'modifier',
+    });
+
+    registerCallback({
+      name: `${collectionName}.subscribe.async`,
+      description: `Perform operations after the subscription has succeeded.`,      
+      arguments: [{subscription: 'The subscription'}, {collection: 'The associated collection'}, {document: 'The associated document'}, {args: 'The arguments'}, {currentUser: 'The current user'}], 
+      runs: 'async', 
+    });
+
+  });
+
+  registerCallback({
+    name: 'stripe.charge.sync',
+    description: 'Modify any metadata before sending the charge to stripe',
+    arguments: [{metadata: 'Metadata about the charge'}, {user: 'The user'}, {product: 'Product created with addProduct'}, {collection: 'Associated collection of the charge'}, {document: 'Associated document in collection to the charge'}, {args: 'Original mutation arguments'}],
+    runs: 'sync',
+    returns: 'The modified arguments to be sent to stripe',
+  });
+
+  registerCallback({
+    name: 'stripe.charge.async',
+    description: 'Perform operations immediately after the stripe charge has completed',
+    arguments: [{charge: 'Charge object returning from stripe'}, {collection: 'Associated collection of the charge'}, {document: 'Associated document in collection to the charge'}, {args: 'Original mutation arguments'}, {user: 'The user'}],
+    runs: 'async',
+  });
+
+  // Create plans if they don't exist
+  if (stripeSettings.createPlans) {
+    // eslint-disable-next-line no-console
+    console.log('Creating stripe plans...');
+    Promise.awaitAll(Object.keys(Products)
+      // Filter out function type products and those without a plan defined (non-subscription)
+      .filter(productKey => typeof Products[productKey] === 'object' && Products[productKey].plan)
+      .map(productKey => createOrRetrievePlan(Products[productKey])));
+    // eslint-disable-next-line no-console
+    console.log('Finished creating stripe plans.');
+  }
+});

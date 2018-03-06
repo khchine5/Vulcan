@@ -1,3 +1,4 @@
+import { Connectors } from 'meteor/vulcan:core';
 import { recalculateScore } from '../modules/scoring.js';
 
 /*
@@ -7,7 +8,7 @@ Update a document's score if necessary.
 Returns how many documents have been updated (1 or 0).
 
 */
-export const updateScore = ({collection, item, forceUpdate}) => {
+export const updateScore = async ({collection, item, forceUpdate}) => {
 
   // Age Check
   const postedAt = item && item.postedAt && item.postedAt.valueOf();
@@ -50,11 +51,11 @@ export const updateScore = ({collection, item, forceUpdate}) => {
 
   // only update database if difference is larger than x to avoid unnecessary updates
   if (forceUpdate || scoreDiff > x) {
-    collection.update(item._id, {$set: {score: newScore, inactive: false}});
+    await Connectors.update(collection, item._id, {$set: {score: newScore, inactive: false}});
     return 1;
   } else if(ageInHours > n*24) {
     // only set a post as inactive if it's older than n days
-    collection.update(item._id, {$set: {inactive: true}});
+    await Connectors.update(collection, item._id, {$set: {inactive: true}});
   }
   return 0;
 };

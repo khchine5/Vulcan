@@ -114,7 +114,7 @@ const withList = (options) => {
         alias: 'withList',
         
         // graphql query options
-        options({terms, paginationTerms, client: apolloClient}) {
+        options({terms, paginationTerms, client: apolloClient, currentUser}) {
           // get terms from options, then props, then pagination
           const mergedTerms = {...options.terms, ...terms, ...paginationTerms};
 
@@ -135,6 +135,11 @@ const withList = (options) => {
 
           if (options.fetchPolicy) {
             graphQLOptions.fetchPolicy = options.fetchPolicy
+          }
+
+          // set to true if running into https://github.com/apollographql/apollo-client/issues/1186
+          if (options.notifyOnNetworkStatusChange) {
+            graphQLOptions.notifyOnNetworkStatusChange = options.notifyOnNetworkStatusChange
           }
           
           return graphQLOptions;
@@ -310,12 +315,6 @@ const queryReducer = (previousResults, action, collection, mergedTerms, listReso
       newResults = removeFromResults(previousResults, removedDocument);
       // console.log('** remove **')
       // console.log('removedDocument: ', removedDocument)
-      break;
-
-    case 'vote':
-      // console.log('** vote **')
-      // reorder results in case vote changed the order
-      newResults = reorderResults(newResults, options.sort);
       break;
 
     default: 
